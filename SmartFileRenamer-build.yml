@@ -1,0 +1,75 @@
+name: Build Smart File Renamer APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Unpack Android project
+        run: |
+          unzip -o SmartFileRenamer-Android-Starter.zip
+          cp -a SmartFileRenamer/. .
+          rm -rf SmartFileRenamer
+
+      - name: Fix Kotlin Compose compiler plugin
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('app/build.gradle.kts')
+          s = p.read_text()
+          # Remove every Compose plugin declaration, including any duplicate inserted by prior fixes.
+          s = re.sub(r'^\s*id\(["\']org\.jetbrains\.kotlin\.plugin\.compose["\']\)(?:\s+version\s+["\'][^"\']+["\'])?\s*\n', '', s, flags=re.M)
+          # Add exactly one versioned declaration inside the module plugins block.
+          m = re.search(r'plugins\s*\{', s)
+          if not m:
+              raise SystemExit('Could not find plugins { } block in app/build.gradle.kts')
+          close = s.find('}', m.end())
+          if close < 0:
+              raise SystemExit('Could not find end of plugins block in app/build.gradle.kts')
+          s = s[:close] + '    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"\n' + s[close:]
+          p.write_text(s)
+          # Fail early if the file still has anything other than one declaration.
+          count = s.count('org.jetbrains.kotlin.plugin.compose')
+          print(f'Compose plugin declarations after correction: {count}')
+          if count != 1:
+              raise SystemExit(f'Expected exactly one Compose plugin declaration, found {count}')
+          PY
+
+      - name: Stabilize background rename worker
+        run: |
+          sed -i '/import androidx.work.WorkerParameters/a import androidx.work.workDataOf' app/src/main/java/com/example/smartfilerenamer/RenameWorker.kt
+          sed -i '/setForeground(foregroundInfo/d' app/src/main/java/com/example/smartfilerenamer/RenameWorker.kt
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartFileRenamer-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
